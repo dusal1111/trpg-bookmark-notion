@@ -17,16 +17,17 @@ STRINGS = {
         "menu": [
             "1. 북마크 수집   (트위터에서 새 북마크 가져오기)",
             "2. 분류          (카테고리별 자동 분류)",
-            "3. Notion 업로드 (Notion DB에 저장)",
-            "4. 전체 실행     (1 → 2 → 3 한 번에)",
-            "5. AI 필드 추출  (시나리오 이름/인원/분위기/개요 자동 추출)",
+            "3. AI 필드 추출  (시나리오 이름/인원/분위기/개요 자동 추출)",
+            "4. Notion 업로드 (Notion DB에 저장)",
+            "5. 전체 실행     (1 → 2 → 3 → 4 한 번에)",
             "6. 전체 재분류   (분류 결과 초기화 후 처음부터 다시)",
             "0. 종료",
         ],
         "input":          "  번호를 입력하세요: ",
-        "step1":          "[1/3] 북마크 수집 중...",
-        "step2":          "[2/3] 분류 중...",
-        "step3":          "[3/3] Notion 업로드 중...",
+        "step1":          "[1/4] 북마크 수집 중...",
+        "step2":          "[2/4] 분류 중...",
+        "step_ai":        "[3/4] AI 필드 추출 중...",
+        "step3":          "[4/4] Notion 업로드 중...",
         "done":           "전체 실행 완료!",
         "reset_confirm":  "분류 결과를 초기화하고 처음부터 다시 분류합니다.\n  계속할까요? (y/n): ",
         "reset_cancel":   "취소했습니다.",
@@ -39,16 +40,17 @@ STRINGS = {
         "menu": [
             "1. Sync bookmarks   (fetch new bookmarks from Twitter)",
             "2. Classify         (auto-categorize bookmarks)",
-            "3. Notion upload    (save to Notion DB)",
-            "4. Run all          (1 → 2 → 3 at once)",
-            "5. AI extract       (auto-extract name/players/mood/overview)",
+            "3. AI extract       (auto-extract name/players/mood/overview)",
+            "4. Notion upload    (save to Notion DB)",
+            "5. Run all          (1 → 2 → 3 → 4 at once)",
             "6. Full reclassify  (reset classifications and start over)",
             "0. Quit",
         ],
         "input":          "  Enter number: ",
-        "step1":          "[1/3] Syncing bookmarks...",
-        "step2":          "[2/3] Classifying...",
-        "step3":          "[3/3] Uploading to Notion...",
+        "step1":          "[1/4] Syncing bookmarks...",
+        "step2":          "[2/4] Classifying...",
+        "step_ai":        "[3/4] AI field extraction...",
+        "step3":          "[4/4] Uploading to Notion...",
         "done":           "All done!",
         "reset_confirm":  "This will reset all classifications and start over.\n  Continue? (y/n): ",
         "reset_cancel":   "Cancelled.",
@@ -61,16 +63,17 @@ STRINGS = {
         "menu": [
             "1. ブックマーク収集    (Twitterから新しいブックマークを取得)",
             "2. 分類               (カテゴリ別に自動分類)",
-            "3. Notion アップロード (Notion DBに保存)",
-            "4. 一括実行           (1 → 2 → 3 をまとめて実行)",
-            "5. AI フィールド抽出  (シナリオ名/人数/雰囲気/概要を自動抽出)",
+            "3. AI フィールド抽出  (シナリオ名/人数/雰囲気/概要を自動抽出)",
+            "4. Notion アップロード (Notion DBに保存)",
+            "5. 一括実行           (1 → 2 → 3 → 4 をまとめて実行)",
             "6. 全体再分類         (分類結果をリセットして最初からやり直し)",
             "0. 終了",
         ],
         "input":          "  番号を入力してください: ",
-        "step1":          "[1/3] ブックマーク収集中...",
-        "step2":          "[2/3] 分類中...",
-        "step3":          "[3/3] Notion アップロード中...",
+        "step1":          "[1/4] ブックマーク収集中...",
+        "step2":          "[2/4] 分類中...",
+        "step_ai":        "[3/4] AI フィールド抽出中...",
+        "step3":          "[4/4] Notion アップロード中...",
         "done":           "すべての処理が完了しました！",
         "reset_confirm":  "分類結果をリセットして最初からやり直します。\n  続けますか？ (y/n): ",
         "reset_cancel":   "キャンセルしました。",
@@ -129,26 +132,28 @@ def main():
         elif choice == "2":
             run("classify_bookmarks.py")
         elif choice == "3":
-            db_id_file = BASE_DIR / "notion_db_id.txt"
-            if db_id_file.exists():
+            run("reclassify_ai.py")
+        elif choice == "4":
+            db_ids_file = BASE_DIR / "notion_db_ids.json"
+            if db_ids_file.exists():
                 run_with_arg("setup_and_upload.py", "--upload")
             else:
                 run("setup_and_upload.py")
-        elif choice == "4":
+        elif choice == "5":
             print(s["step1"])
             run("bookmark_sync.py")
             print(s["step2"])
             run("classify_bookmarks.py")
+            print(s["step_ai"])
+            run("reclassify_ai.py")
             print(s["step3"])
-            db_id_file = BASE_DIR / "notion_db_id.txt"
-            if db_id_file.exists():
+            db_ids_file = BASE_DIR / "notion_db_ids.json"
+            if db_ids_file.exists():
                 run_with_arg("setup_and_upload.py", "--upload")
             else:
                 run("setup_and_upload.py")
             print()
             print(s["done"])
-        elif choice == "5":
-            run("reclassify_ai.py")
         elif choice == "6":
             confirm = input(s["reset_confirm"]).strip().lower()
             if confirm == "y":

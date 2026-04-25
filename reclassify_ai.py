@@ -51,7 +51,7 @@ if OPENAI_API_KEY:
     SLEEP_SEC   = 1
 elif VERTEX_PROJECT_ID:
     AI_PROVIDER = "vertex"
-    BATCH_SIZE  = 5
+    BATCH_SIZE  = 3   # array schema 조기 종료 버그 우회 → 배치 줄임
     SLEEP_SEC   = 2
 elif GEMINI_API_KEY:
     AI_PROVIDER = "gemini"
@@ -65,6 +65,22 @@ else:
 DRY_RUN = "--dry-run" in sys.argv
 RESET   = "--reset"   in sys.argv
 
+# Vertex AI / Gemini 공통 응답 스키마 (OpenAPI 3.0 nullable 형식)
+_RESPONSE_SCHEMA = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "scenarioName": {"type": "string"},
+            "minPlayers":   {"type": "integer", "nullable": True},
+            "maxPlayers":   {"type": "integer", "nullable": True},
+            "mood":         {"type": "array", "items": {"type": "string"}},
+            "overview":     {"type": "string"},
+            "systemId":     {"type": "string",  "nullable": True},
+        },
+        "required": ["scenarioName", "mood", "overview"],
+    },
+}
 
 
 def load_systems() -> dict[str, str]:
@@ -86,7 +102,11 @@ def build_prompt(batch: list, sys_map: dict[str, str]) -> str:
     tweet_block = "\n".join(lines)
 
     return f"""다음 TRPG 시나리오 트윗들을 분석해서 JSON 배열로 정보를 추출해줘.
-코드블록(```) 없이 JSON 배열만 반환해. 설명 금지.
+반드시 유효한 JSON만 반환해.
+절대로 설명, 텍스트, 코드블록 포함하지 마라.
+JSON 외 문자 하나라도 포함되면 오류로 처리된다.
+각 객체의 필드는 반드시 아래 순서를 지켜라:
+scenarioName → minPlayers → maxPlayers → mood → overview → systemId
 
 추출할 필드:
 - scenarioName (string): 트윗에 명시된 시나리오 제목. 없으면 "".
@@ -161,7 +181,9 @@ def call_gemini(prompt: str) -> str:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
-                "maxOutputTokens": 4096,
+                "maxOutputTokens": 8192,
+                "responseMimeType": "application/json",
+                "responseSchema": _RESPONSE_SCHEMA,
                 "thinkingConfig": {"thinkingBudget": 0},
             },
         },
@@ -194,10 +216,19 @@ def call_vertex(prompt: str) -> str:
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.1,
-            max_output_tokens=4096,
+            max_output_tokens=8192,
+            response_mime_type="application/json",
+            response_schema=_RESPONSE_SCHEMA,
         ),
     )
-    return response.text.strip()
+    text = response.text
+    if not text:
+        try:
+            reason = response.candidates[0].finish_reason
+        except (IndexError, AttributeError):
+            reason = "unknown"
+        raise ValueError(f"Vertex 응답 비어있음. finish_reason={reason}")
+    return text.strip()
 
 
 def call_ai(prompt: str) -> str:
@@ -210,13 +241,36 @@ def call_ai(prompt: str) -> str:
     raise ValueError("API 키 없음")
 
 
+import re
+
+def _fix_missing_commas(s: str) -> str:
+    # ]"key" → ],"key"
+    s = re.sub(
+        r'(\]|\}|null|true|false|\d)\s*"(?=(scenarioName|minPlayers|maxPlayers|mood|overview|systemId))',
+        r'\1,"',
+        s
+    )
+    return s
+
 def parse_response(text: str, batch_size: int) -> list[dict]:
     """AI 응답 텍스트 → dict 리스트."""
     start = text.find("[")
     end   = text.rfind("]") + 1
     if start == -1 or end <= start:
         raise ValueError(f"JSON 배열 없음 (응답 잘림 가능성). 응답: {text[:300]}")
-    items = json.loads(text[start:end])
+    json_str = text[start:end]
+    try:
+        items = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        col = e.colno - 1  # 0-based index
+        print(f"⚠️ JSON 파싱 실패 ({e})")
+        print(f"   문제 위치 주변: {repr(json_str[max(0,col-20):col+100])}")
+        repaired = _fix_missing_commas(json_str)
+        try:
+            items = json.loads(repaired)
+            print("⚠️ 쉼표 누락 자동 복구 성공")
+        except:
+            raise RuntimeError("retry_json")
     if len(items) != batch_size:
         raise ValueError(f"응답 수 불일치: {len(items)} != {batch_size}")
     return items
@@ -321,9 +375,11 @@ def main():
     consecutive_errors = 0
     MAX_CONSECUTIVE = 3  # 연속 오류 이 횟수 초과 시 중단
 
-    for batch_idx in range(total_batches):
+    batch_idx = 0
+    while batch_idx < total_batches:
         batch = targets[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
         if all(b["id"] in progress for b in batch):
+            batch_idx += 1
             continue
 
         prompt = build_prompt(batch, sys_map)
@@ -342,7 +398,8 @@ def main():
 
             done = min((batch_idx + 1) * BATCH_SIZE, len(targets))
             print(f"  [{done}/{len(targets)}] 추출 완료...", end="\r")
-            consecutive_errors = 0  # 성공 시 초기화
+            consecutive_errors = 0
+            batch_idx += 1
 
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="ignore")
@@ -353,16 +410,25 @@ def main():
                 print("  ⏳ Rate limit → 60초 대기 후 계속...")
                 time.sleep(60)
                 consecutive_errors = 0
+            batch_idx += 1
         except RuntimeError as e:
             if str(e) == "quota_exceeded":
                 break
+            if str(e) == "retry_json":
+                print(f"🔁 동일 배치 재요청")
+                consecutive_errors += 1
+                if consecutive_errors < MAX_CONSECUTIVE:
+                    time.sleep(SLEEP_SEC)
+                    continue  # batch_idx 그대로 → 같은 배치 재시도
             print(f"\n  [배치 {batch_idx+1}] 오류: {e}")
             errors += 1
             consecutive_errors += 1
+            batch_idx += 1
         except Exception as e:
             print(f"\n  [배치 {batch_idx+1}] 오류: {e}")
             errors += 1
             consecutive_errors += 1
+            batch_idx += 1
 
         if consecutive_errors >= MAX_CONSECUTIVE:
             print(f"\n  연속 {MAX_CONSECUTIVE}회 오류 → 중단합니다.")

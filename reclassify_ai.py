@@ -17,7 +17,8 @@ classified_bookmarks.jsonl 의 모든 항목에 대해 AI로 필드 추출
     python reclassify_ai.py --dry-run  (실제 저장 없이 결과만 확인)
 """
 
-import json, os, sys, time
+import json, os, re, sys, time, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib import request as ureq
 import urllib.error
@@ -35,11 +36,10 @@ if _env_file.exists():
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
 
-OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY", "")
-GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
-VERTEX_PROJECT_ID   = os.environ.get("VERTEX_PROJECT_ID", "")
-VERTEX_REGION       = os.environ.get("VERTEX_REGION", "global")
-VERTEX_ACCESS_TOKEN = os.environ.get("VERTEX_ACCESS_TOKEN", "")  # gcloud auth print-access-token
+OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
+GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "")
+VERTEX_PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID", "")
+VERTEX_REGION     = os.environ.get("VERTEX_REGION", "global")
 
 OPENAI_MODEL = "gpt-4.1-mini"
 GEMINI_MODEL = "gemini-3-flash-preview"
@@ -49,24 +49,28 @@ if OPENAI_API_KEY:
     AI_PROVIDER = "openai"
     BATCH_SIZE  = 10
     SLEEP_SEC   = 1
+    WORKERS     = 1
 elif VERTEX_PROJECT_ID:
     AI_PROVIDER = "vertex"
-    BATCH_SIZE  = 3   # array schema 조기 종료 버그 우회 → 배치 줄임
-    SLEEP_SEC   = 2
+    BATCH_SIZE  = 3
+    SLEEP_SEC   = 0
+    WORKERS     = 3   # 병렬 요청 수
 elif GEMINI_API_KEY:
     AI_PROVIDER = "gemini"
     BATCH_SIZE  = 5
     SLEEP_SEC   = 4
+    WORKERS     = 1
 else:
     AI_PROVIDER = None
     BATCH_SIZE  = 10
     SLEEP_SEC   = 1
+    WORKERS     = 1
 
 DRY_RUN = "--dry-run" in sys.argv
 RESET   = "--reset"   in sys.argv
 
-# Vertex AI / Gemini 공통 응답 스키마 (OpenAPI 3.0 nullable 형식)
-_RESPONSE_SCHEMA = {
+# Gemini AI Studio 전용 응답 스키마
+_GEMINI_SCHEMA = {
     "type": "array",
     "items": {
         "type": "object",
@@ -76,7 +80,7 @@ _RESPONSE_SCHEMA = {
             "maxPlayers":   {"type": "integer", "nullable": True},
             "mood":         {"type": "array", "items": {"type": "string"}},
             "overview":     {"type": "string"},
-            "systemId":     {"type": "string",  "nullable": True},
+            "systemId":     {"type": "string", "nullable": True},
         },
         "required": ["scenarioName", "mood", "overview"],
     },
@@ -84,29 +88,21 @@ _RESPONSE_SCHEMA = {
 
 
 def load_systems() -> dict[str, str]:
-    """system_id → label 매핑 반환."""
     with open(SYSTEMS_FILE, encoding="utf-8") as f:
         return {s["id"]: s["label"] for s in json.load(f)["systems"]}
 
 
 def build_prompt(batch: list, sys_map: dict[str, str]) -> str:
     valid_sys = ", ".join(f'"{sid}"' for sid in sys_map if sid != "other")
-    valid_sys += ', null'
-
+    valid_sys += ", null"
     lines = []
     for i, bm in enumerate(batch, 1):
         sys_label = bm.get("systemLabel", "기타")
         text = (bm.get("text") or "").replace("\n", " ")[:300]
         lines.append(f"[{i}] [{sys_label}] {text}")
-
     tweet_block = "\n".join(lines)
-
     return f"""다음 TRPG 시나리오 트윗들을 분석해서 JSON 배열로 정보를 추출해줘.
-반드시 유효한 JSON만 반환해.
-절대로 설명, 텍스트, 코드블록 포함하지 마라.
-JSON 외 문자 하나라도 포함되면 오류로 처리된다.
-각 객체의 필드는 반드시 아래 순서를 지켜라:
-scenarioName → minPlayers → maxPlayers → mood → overview → systemId
+코드블록(```) 없이 JSON 배열만 반환해. 설명 금지.
 
 추출할 필드:
 - scenarioName (string): 트윗에 명시된 시나리오 제목. 없으면 "".
@@ -126,6 +122,7 @@ scenarioName → minPlayers → maxPlayers → mood → overview → systemId
 [{{"scenarioName":"...","minPlayers":1,"maxPlayers":4,"mood":["공포"],"overview":"...","systemId":null}}, ...]"""
 
 
+# ── HTTP 헬퍼 ────────────────────────────────────────────────────────────
 def _http_post(url: str, payload_dict: dict, headers: dict) -> dict:
     payload = json.dumps(payload_dict).encode("utf-8")
     retry_waits = [15, 30, 60]
@@ -139,11 +136,8 @@ def _http_post(url: str, payload_dict: dict, headers: dict) -> dict:
             last_err = e
             if e.code in (429, 503) and attempt < 3:
                 body = e.read().decode("utf-8", errors="ignore")
-                # 크레딧 소진/결제 문제는 재시도해도 해결 안 됨 → 즉시 중단
                 if "quota" in body or "billing" in body or "insufficient_quota" in body:
                     print(f"\n  ❌ API 크레딧 소진 또는 결제 문제입니다.")
-                    print("     OpenAI 대시보드에서 크레딧을 충전해주세요.")
-                    print("     https://platform.openai.com/settings/organization/billing")
                     raise RuntimeError("quota_exceeded") from e
                 wait = retry_waits[attempt]
                 print(f"\n  ⏳ HTTP {e.code} → {wait}초 후 재시도 ({attempt+1}/3)...")
@@ -153,6 +147,7 @@ def _http_post(url: str, payload_dict: dict, headers: dict) -> dict:
     raise last_err
 
 
+# ── AI 호출 ──────────────────────────────────────────────────────────────
 def call_openai(prompt: str) -> str:
     result = _http_post(
         "https://api.openai.com/v1/chat/completions",
@@ -160,12 +155,9 @@ def call_openai(prompt: str) -> str:
             "model": OPENAI_MODEL,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
         },
-        {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-        }
+        {"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"},
     )
     return result["choices"][0]["message"]["content"].strip()
 
@@ -183,11 +175,11 @@ def call_gemini(prompt: str) -> str:
                 "temperature": 0.1,
                 "maxOutputTokens": 8192,
                 "responseMimeType": "application/json",
-                "responseSchema": _RESPONSE_SCHEMA,
+                "responseSchema": _GEMINI_SCHEMA,
                 "thinkingConfig": {"thinkingBudget": 0},
             },
         },
-        {"Content-Type": "application/json"}
+        {"Content-Type": "application/json"},
     )
     candidate = result.get("candidates", [{}])[0]
     parts = candidate.get("content", {}).get("parts", [])
@@ -202,15 +194,8 @@ def call_vertex(prompt: str) -> str:
         from google import genai
         from google.genai import types
     except ImportError:
-        raise RuntimeError(
-            "google-genai 미설치. 다음 명령어로 설치하세요:\n"
-            "  pip install google-genai"
-        )
-    client = genai.Client(
-        vertexai=True,
-        project=VERTEX_PROJECT_ID,
-        location=VERTEX_REGION,
-    )
+        raise RuntimeError("google-genai 미설치. pip install google-genai")
+    client = genai.Client(vertexai=True, project=VERTEX_PROJECT_ID, location=VERTEX_REGION)
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
@@ -218,7 +203,7 @@ def call_vertex(prompt: str) -> str:
             temperature=0.1,
             max_output_tokens=8192,
             response_mime_type="application/json",
-            response_schema=_RESPONSE_SCHEMA,
+            response_schema=_GEMINI_SCHEMA,  # BATCH_SIZE=1이므로 1-item array, 잘림 없음
         ),
     )
     text = response.text
@@ -241,68 +226,82 @@ def call_ai(prompt: str) -> str:
     raise ValueError("API 키 없음")
 
 
-import re
-
-def _fix_missing_commas(s: str) -> str:
-    # ]"key" → ],"key"
-    s = re.sub(
-        r'(\]|\}|null|true|false|\d)\s*"(?=(scenarioName|minPlayers|maxPlayers|mood|overview|systemId))',
-        r'\1,"',
-        s
-    )
+# ── JSON 파싱 ────────────────────────────────────────────────────────────
+def _repair_json(s: str) -> str:
+    """문자열 내 이스케이프 누락 + 객체 간 쉼표 누락 수정."""
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            result.append(ch); escape_next = False
+        elif ch == "\\":
+            result.append(ch); escape_next = True
+        elif ch == '"':
+            in_string = not in_string; result.append(ch)
+        elif in_string and ch == "\n":
+            result.append("\\n")
+        elif in_string and ch == "\r":
+            result.append("\\r")
+        elif in_string and ch == "\t":
+            result.append("\\t")
+        else:
+            result.append(ch)
+    s = "".join(result)
+    s = re.sub(r"\}\s*\{", "}, {", s)
     return s
 
+
 def parse_response(text: str, batch_size: int) -> list[dict]:
-    """AI 응답 텍스트 → dict 리스트."""
     start = text.find("[")
     end   = text.rfind("]") + 1
     if start == -1 or end <= start:
-        raise ValueError(f"JSON 배열 없음 (응답 잘림 가능성). 응답: {text[:300]}")
+        raise ValueError(f"JSON 배열 없음. 응답: {text[:200]}")
     json_str = text[start:end]
     try:
         items = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        col = e.colno - 1  # 0-based index
-        print(f"⚠️ JSON 파싱 실패 ({e})")
-        print(f"   문제 위치 주변: {repr(json_str[max(0,col-20):col+100])}")
-        repaired = _fix_missing_commas(json_str)
+    except json.JSONDecodeError:
         try:
-            items = json.loads(repaired)
-            print("⚠️ 쉼표 누락 자동 복구 성공")
-        except:
+            items = json.loads(_repair_json(json_str))
+        except json.JSONDecodeError as e2:
+            col = e2.colno - 1
+            print(f"⚠️ JSON 파싱 실패 ({e2})")
+            print(f"   문제 위치 주변: {repr(json_str[max(0,col-20):col+20])}")
             raise RuntimeError("retry_json")
     if len(items) != batch_size:
         raise ValueError(f"응답 수 불일치: {len(items)} != {batch_size}")
     return items
 
 
+# ── 결과 적용 ────────────────────────────────────────────────────────────
 def apply_result(bm: dict, result: dict, sys_map: dict[str, str]) -> dict:
-    """AI 추출 결과를 북마크 딕셔너리에 적용. 원본 수정 없이 복사본 반환."""
     out = dict(bm)
-
     out["scenarioName"] = str(result.get("scenarioName") or "")
-
     min_p = result.get("minPlayers")
     max_p = result.get("maxPlayers")
     out["minPlayers"] = int(min_p) if min_p is not None else None
     out["maxPlayers"] = int(max_p) if max_p is not None else None
-
     raw_mood = result.get("mood") or []
     out["mood"] = [str(m).strip() for m in raw_mood if m and str(m).strip()]
-
     out["overview"] = str(result.get("overview") or "")
-
-    # 기타 항목만 시스템 재분류
     if bm.get("systemId") == "other":
         new_sys = result.get("systemId")
         if new_sys and new_sys in sys_map and new_sys != "other":
             out["systemId"]    = new_sys
             out["systemLabel"] = sys_map[new_sys]
-
     out["aiEnriched"] = True
     return out
 
 
+# ── 단일 배치 처리 (재시도 포함) ─────────────────────────────────────────
+def process_batch(batch: list, sys_map: dict[str, str]) -> dict[str, dict]:
+    """배치 처리 → {bm_id: result_dict}. 실패 시 예외."""
+    raw   = call_ai(build_prompt(batch, sys_map))
+    items = parse_response(raw, len(batch))
+    return {bm["id"]: item for bm, item in zip(batch, items)}
+
+
+# ── 메인 ─────────────────────────────────────────────────────────────────
 def main():
     print("=" * 55)
     print("  AI 필드 추출 (시나리오 이름 / 인원 / 분위기 / 개요)")
@@ -310,26 +309,17 @@ def main():
 
     if not AI_PROVIDER:
         print("\n⚠️  AI API 키가 없습니다.")
-        print("  아래 중 하나를 .env 파일에 추가하세요:\n")
-        print("  OPENAI_API_KEY=sk-...")
-        print("    발급: https://platform.openai.com/api-keys\n")
-        print("  GEMINI_API_KEY=AIza...")
-        print("    발급: https://aistudio.google.com\n")
-        print("  VERTEX_PROJECT_ID=my-gcp-project  (+ VERTEX_REGION 선택, 기본 us-central1)")
-        print("    인증: pip install google-auth 후 gcloud auth application-default login")
-        print("    또는: .env에 VERTEX_ACCESS_TOKEN=<gcloud auth print-access-token 결과>\n")
+        print("  OPENAI_API_KEY / GEMINI_API_KEY / VERTEX_PROJECT_ID 중 하나를 .env에 추가하세요.")
         sys.exit(1)
 
-    if AI_PROVIDER == "openai":
-        provider_label = f"OpenAI ({OPENAI_MODEL})"
-    elif AI_PROVIDER == "vertex":
-        provider_label = f"Vertex AI ({GEMINI_MODEL}, project={VERTEX_PROJECT_ID}, region={VERTEX_REGION})"
-        # google-genai 설치 여부 미리 확인
+    if AI_PROVIDER == "vertex":
         import importlib.util
         if importlib.util.find_spec("google.genai") is None:
-            print("\n❌ google-genai 미설치. 다음 명령어로 설치하세요:")
-            print("   pip install google-genai")
+            print("\n❌ google-genai 미설치: pip install google-genai")
             sys.exit(1)
+        provider_label = f"Vertex AI ({GEMINI_MODEL}, {VERTEX_PROJECT_ID}, {VERTEX_REGION}, workers={WORKERS})"
+    elif AI_PROVIDER == "openai":
+        provider_label = f"OpenAI ({OPENAI_MODEL})"
     else:
         provider_label = f"Gemini AI Studio ({GEMINI_MODEL})"
     print(f"  사용 API: {provider_label}\n")
@@ -352,14 +342,12 @@ def main():
         print(f"전체: {len(all_bookmarks)}개 / 미추출: {len(targets)}개\n")
 
     if not targets:
-        print("추출할 항목 없음.")
-        print("재추출 하려면: python reclassify_ai.py --reset")
+        print("추출할 항목 없음. 재추출: python reclassify_ai.py --reset")
         return
 
     if DRY_RUN:
         print("[DRY-RUN 모드: 저장 안 함]\n")
 
-    # 이전 진행분 로드
     progress: dict[str, dict] = {}
     if PROGRESS_FILE.exists() and not DRY_RUN and not RESET:
         try:
@@ -370,71 +358,51 @@ def main():
         except Exception:
             pass
 
-    total_batches = (len(targets) + BATCH_SIZE - 1) // BATCH_SIZE
-    errors = 0
-    consecutive_errors = 0
-    MAX_CONSECUTIVE = 3  # 연속 오류 이 횟수 초과 시 중단
+    # 처리할 배치 목록
+    pending_batches = [
+        targets[i : i + BATCH_SIZE]
+        for i in range(0, len(targets), BATCH_SIZE)
+        if not all(b["id"] in progress for b in targets[i : i + BATCH_SIZE])
+    ]
 
-    batch_idx = 0
-    while batch_idx < total_batches:
-        batch = targets[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
-        if all(b["id"] in progress for b in batch):
-            batch_idx += 1
-            continue
+    total_items = len(targets)
+    done_count  = sum(1 for b in targets if b["id"] in progress)
+    errors      = 0
+    progress_lock = threading.Lock()
+    quota_hit   = threading.Event()
 
-        prompt = build_prompt(batch, sys_map)
+    def save_progress():
+        if not DRY_RUN:
+            PROGRESS_FILE.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
 
-        try:
-            raw    = call_ai(prompt)
-            items  = parse_response(raw, len(batch))
+    print(f"  배치 {len(pending_batches)}개 × {BATCH_SIZE}항목, 병렬 {WORKERS}개\n")
 
-            for bm, result in zip(batch, items):
-                progress[bm["id"]] = result
-
-            if not DRY_RUN:
-                PROGRESS_FILE.write_text(
-                    json.dumps(progress, ensure_ascii=False), encoding="utf-8"
-                )
-
-            done = min((batch_idx + 1) * BATCH_SIZE, len(targets))
-            print(f"  [{done}/{len(targets)}] 추출 완료...", end="\r")
-            consecutive_errors = 0
-            batch_idx += 1
-
-        except urllib.error.HTTPError as e:
-            body = e.read().decode("utf-8", errors="ignore")
-            print(f"\n  [배치 {batch_idx+1}] HTTP {e.code}: {body[:200]}")
-            errors += 1
-            consecutive_errors += 1
-            if e.code == 429:
-                print("  ⏳ Rate limit → 60초 대기 후 계속...")
-                time.sleep(60)
-                consecutive_errors = 0
-            batch_idx += 1
-        except RuntimeError as e:
-            if str(e) == "quota_exceeded":
-                break
-            if str(e) == "retry_json":
-                print(f"🔁 동일 배치 재요청")
-                consecutive_errors += 1
-                if consecutive_errors < MAX_CONSECUTIVE:
-                    time.sleep(SLEEP_SEC)
-                    continue  # batch_idx 그대로 → 같은 배치 재시도
-            print(f"\n  [배치 {batch_idx+1}] 오류: {e}")
-            errors += 1
-            consecutive_errors += 1
-            batch_idx += 1
-        except Exception as e:
-            print(f"\n  [배치 {batch_idx+1}] 오류: {e}")
-            errors += 1
-            consecutive_errors += 1
-            batch_idx += 1
-
-        if consecutive_errors >= MAX_CONSECUTIVE:
-            print(f"\n  연속 {MAX_CONSECUTIVE}회 오류 → 중단합니다.")
-            break
-
-        time.sleep(SLEEP_SEC)
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        futures = {executor.submit(process_batch, batch, sys_map): batch for batch in pending_batches}
+        for future in as_completed(futures):
+            if quota_hit.is_set():
+                future.cancel()
+                continue
+            try:
+                result_map = future.result()
+                with progress_lock:
+                    progress.update(result_map)
+                    done_count += len(result_map)
+                    print(f"  [{done_count}/{total_items}] 추출 완료...", end="\r")
+                    save_progress()
+            except RuntimeError as e:
+                if str(e) == "quota_exceeded":
+                    quota_hit.set()
+                    print("\n  ❌ 크레딧 소진 → 중단")
+                elif str(e) == "retry_json":
+                    print(f"\n  ⏭ JSON 파싱 실패 → 스킵 (다음 실행 때 재처리)")
+                    errors += 1
+                else:
+                    print(f"\n  [오류] {e}")
+                    errors += 1
+            except Exception as e:
+                print(f"\n  [오류] {e}")
+                errors += 1
 
     print(f"\n\nAI 추출 완료: {len(progress)}개 / 오류: {errors}배치")
 
@@ -445,7 +413,6 @@ def main():
             print(f"\n샘플 결과: {json.dumps(sample, ensure_ascii=False, indent=2)}")
         return
 
-    # classified_bookmarks.jsonl 업데이트
     id_to_bm = {b["id"]: b for b in all_bookmarks}
     for bm_id, result in progress.items():
         if bm_id in id_to_bm:
@@ -463,7 +430,6 @@ def main():
     enriched = sum(1 for b in updated if b.get("aiEnriched"))
     print(f"저장 완료: {enriched}개 AI 추출됨 → {CLASSIFIED_FILE.name}")
 
-    # 시스템별 최종 통계
     stat: dict[str, int] = {}
     for bm in updated:
         lbl = bm.get("systemLabel", "기타")

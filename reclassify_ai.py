@@ -17,7 +17,7 @@ classified_bookmarks.jsonl 의 모든 항목에 대해 AI로 필드 추출
     python reclassify_ai.py --dry-run  (실제 저장 없이 결과만 확인)
 """
 
-import json, os, sys, time
+import json, os, sys, time, subprocess
 from pathlib import Path
 from urllib import request as ureq
 import urllib.error
@@ -35,16 +35,24 @@ if _env_file.exists():
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip())
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY", "")
+GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
+VERTEX_PROJECT_ID   = os.environ.get("VERTEX_PROJECT_ID", "")
+VERTEX_REGION       = os.environ.get("VERTEX_REGION", "us-central1")
+VERTEX_ACCESS_TOKEN = os.environ.get("VERTEX_ACCESS_TOKEN", "")  # gcloud auth print-access-token
 
 OPENAI_MODEL = "gpt-4.1-mini"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3-flash-preview"
 
+# 우선순위: OpenAI > Vertex AI > Gemini AI Studio
 if OPENAI_API_KEY:
     AI_PROVIDER = "openai"
     BATCH_SIZE  = 10
     SLEEP_SEC   = 1
+elif VERTEX_PROJECT_ID:
+    AI_PROVIDER = "vertex"
+    BATCH_SIZE  = 5
+    SLEEP_SEC   = 2
 elif GEMINI_API_KEY:
     AI_PROVIDER = "gemini"
     BATCH_SIZE  = 5
@@ -110,6 +118,13 @@ def _http_post(url: str, payload_dict: dict, headers: dict) -> dict:
         except urllib.error.HTTPError as e:
             last_err = e
             if e.code in (429, 503) and attempt < 3:
+                body = e.read().decode("utf-8", errors="ignore")
+                # 크레딧 소진/결제 문제는 재시도해도 해결 안 됨 → 즉시 중단
+                if "quota" in body or "billing" in body or "insufficient_quota" in body:
+                    print(f"\n  ❌ API 크레딧 소진 또는 결제 문제입니다.")
+                    print("     OpenAI 대시보드에서 크레딧을 충전해주세요.")
+                    print("     https://platform.openai.com/settings/organization/billing")
+                    raise RuntimeError("quota_exceeded") from e
                 wait = retry_waits[attempt]
                 print(f"\n  ⏳ HTTP {e.code} → {wait}초 후 재시도 ({attempt+1}/3)...")
                 time.sleep(wait)
@@ -146,7 +161,7 @@ def call_gemini(prompt: str) -> str:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
-                "maxOutputTokens": 1024,
+                "maxOutputTokens": 4096,
                 "thinkingConfig": {"thinkingBudget": 0},
             },
         },
@@ -160,20 +175,126 @@ def call_gemini(prompt: str) -> str:
     raise ValueError(f"응답 비어있음. finishReason={candidate.get('finishReason')}")
 
 
+def _get_vertex_token() -> str:
+    """
+    Vertex AI Bearer 토큰 반환. 아래 순서로 시도.
+    1) google-auth ADC (gcloud auth application-default login)
+    2) gcloud auth print-access-token (gcloud auth login)
+    3) VERTEX_ACCESS_TOKEN 환경변수
+    """
+    # 1) google-auth ADC
+    try:
+        import google.auth
+        import google.auth.transport.requests
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        creds.refresh(google.auth.transport.requests.Request())
+        return creds.token
+    except ImportError:
+        print("  ℹ️  google-auth 미설치 → gcloud CLI로 시도합니다.")
+    except Exception as e:
+        print(f"  ⚠️  google-auth ADC 실패: {e}")
+
+    # 2) gcloud CLI (Windows는 gcloud.cmd, 일반 환경은 gcloud)
+    gcloud_bin = "gcloud.cmd" if sys.platform == "win32" else "gcloud"
+    gcloud_candidates = [gcloud_bin]
+
+    # Windows 기본 설치 경로 직접 탐색
+    if sys.platform == "win32":
+        import glob as _glob
+        patterns = [
+            r"C:\Users\*\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
+            r"C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
+            r"C:\Program Files\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
+        ]
+        for pat in patterns:
+            found = _glob.glob(pat)
+            if found:
+                gcloud_candidates.insert(0, found[0])
+                break
+
+    gcloud_found = False
+    for gcloud in gcloud_candidates:
+        for args in (
+            [gcloud, "auth", "print-access-token"],
+            [gcloud, "auth", "application-default", "print-access-token"],
+        ):
+            try:
+                result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+                token = result.stdout.strip()
+                if result.returncode == 0 and token:
+                    return token
+                if result.stderr.strip():
+                    print(f"  ⚠️  {' '.join(args)} 실패: {result.stderr.strip()}")
+                gcloud_found = True
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                print(f"  ⚠️  gcloud 실행 오류: {e}")
+                gcloud_found = True
+
+    if not gcloud_found:
+        print("  ⚠️  gcloud CLI를 찾을 수 없습니다.")
+
+    # 3) 환경변수 직접 입력
+    if VERTEX_ACCESS_TOKEN:
+        return VERTEX_ACCESS_TOKEN
+
+    raise RuntimeError(
+        "Vertex AI 인증 실패. 다음 중 하나를 시도하세요:\n"
+        "  1) pip install google-auth requests\n"
+        "     gcloud auth application-default login\n"
+        "  2) gcloud auth login  →  gcloud auth print-access-token\n"
+        "     결과를 .env에 VERTEX_ACCESS_TOKEN=ya29... 로 추가\n"
+        "  3) 또는 GEMINI_API_KEY를 aistudio.google.com 에서 새로 발급"
+    )
+
+
+def call_vertex(prompt: str) -> str:
+    token = _get_vertex_token()
+    url = (
+        f"https://{VERTEX_REGION}-aiplatform.googleapis.com/v1/projects/{VERTEX_PROJECT_ID}"
+        f"/locations/{VERTEX_REGION}/publishers/google/models/{GEMINI_MODEL}:generateContent"
+    )
+    result = _http_post(
+        url,
+        {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 4096,
+            },
+        },
+        {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+    )
+    candidate = result.get("candidates", [{}])[0]
+    parts = candidate.get("content", {}).get("parts", [])
+    for p in parts:
+        if "text" in p and not p.get("thought", False):
+            return p["text"].strip()
+    raise ValueError(f"응답 비어있음. finishReason={candidate.get('finishReason')}")
+
+
 def call_ai(prompt: str) -> str:
     if AI_PROVIDER == "openai":
         return call_openai(prompt)
+    elif AI_PROVIDER == "vertex":
+        return call_vertex(prompt)
     elif AI_PROVIDER == "gemini":
         return call_gemini(prompt)
     raise ValueError("API 키 없음")
 
 
 def parse_response(text: str, batch_size: int) -> list[dict]:
-    """AI 응답 텍스트 → dict 리스트. 파싱 실패 시 빈 dict 반환."""
+    """AI 응답 텍스트 → dict 리스트."""
     start = text.find("[")
     end   = text.rfind("]") + 1
-    if start == -1:
-        raise ValueError(f"JSON 배열 없음. 응답: {text[:200]}")
+    if start == -1 or end <= start:
+        raise ValueError(f"JSON 배열 없음 (응답 잘림 가능성). 응답: {text[:300]}")
     items = json.loads(text[start:end])
     if len(items) != batch_size:
         raise ValueError(f"응답 수 불일치: {len(items)} != {batch_size}")
@@ -219,9 +340,23 @@ def main():
         print("    발급: https://platform.openai.com/api-keys\n")
         print("  GEMINI_API_KEY=AIza...")
         print("    발급: https://aistudio.google.com\n")
+        print("  VERTEX_PROJECT_ID=my-gcp-project  (+ VERTEX_REGION 선택, 기본 us-central1)")
+        print("    인증: pip install google-auth 후 gcloud auth application-default login")
+        print("    또는: .env에 VERTEX_ACCESS_TOKEN=<gcloud auth print-access-token 결과>\n")
         sys.exit(1)
 
-    provider_label = f"OpenAI ({OPENAI_MODEL})" if AI_PROVIDER == "openai" else f"Gemini ({GEMINI_MODEL})"
+    if AI_PROVIDER == "openai":
+        provider_label = f"OpenAI ({OPENAI_MODEL})"
+    elif AI_PROVIDER == "vertex":
+        provider_label = f"Vertex AI ({GEMINI_MODEL}, project={VERTEX_PROJECT_ID}, region={VERTEX_REGION})"
+        # 배치 시작 전에 인증 토큰 미리 검증
+        try:
+            _get_vertex_token()
+        except RuntimeError as e:
+            print(f"\n❌ Vertex AI 인증 실패:\n  {e}")
+            sys.exit(1)
+    else:
+        provider_label = f"Gemini AI Studio ({GEMINI_MODEL})"
     print(f"  사용 API: {provider_label}\n")
 
     sys_map = load_systems()
@@ -262,6 +397,8 @@ def main():
 
     total_batches = (len(targets) + BATCH_SIZE - 1) // BATCH_SIZE
     errors = 0
+    consecutive_errors = 0
+    MAX_CONSECUTIVE = 3  # 연속 오류 이 횟수 초과 시 중단
 
     for batch_idx in range(total_batches):
         batch = targets[batch_idx * BATCH_SIZE : (batch_idx + 1) * BATCH_SIZE]
@@ -284,17 +421,31 @@ def main():
 
             done = min((batch_idx + 1) * BATCH_SIZE, len(targets))
             print(f"  [{done}/{len(targets)}] 추출 완료...", end="\r")
+            consecutive_errors = 0  # 성공 시 초기화
 
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="ignore")
-            print(f"\n  [배치 {batch_idx+1}] HTTP {e.code}: {body[:120]}")
+            print(f"\n  [배치 {batch_idx+1}] HTTP {e.code}: {body[:200]}")
             errors += 1
+            consecutive_errors += 1
             if e.code == 429:
                 print("  ⏳ Rate limit → 60초 대기 후 계속...")
                 time.sleep(60)
+                consecutive_errors = 0
+        except RuntimeError as e:
+            if str(e) == "quota_exceeded":
+                break
+            print(f"\n  [배치 {batch_idx+1}] 오류: {e}")
+            errors += 1
+            consecutive_errors += 1
         except Exception as e:
             print(f"\n  [배치 {batch_idx+1}] 오류: {e}")
             errors += 1
+            consecutive_errors += 1
+
+        if consecutive_errors >= MAX_CONSECUTIVE:
+            print(f"\n  연속 {MAX_CONSECUTIVE}회 오류 → 중단합니다.")
+            break
 
         time.sleep(SLEEP_SEC)
 

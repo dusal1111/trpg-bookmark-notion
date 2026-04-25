@@ -9,6 +9,7 @@ uploaded_ids.json
 notion_db_id.txt
 .reclassify_progress.json
 .ai_enrich_progress.json
+notion_db_ids.json
 
 # Python 캐시
 __pycache__/

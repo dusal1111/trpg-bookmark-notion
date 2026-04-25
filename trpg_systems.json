@@ -1,0 +1,64 @@
+{
+  "_comment": "TRPG 시스템 정의. keywords 기반으로 분류 (대소문자 무시, 부분일치, 순서 우선).",
+  "_comment2": "db_title: Notion DB 제목. keywords에 키워드 추가/삭제해서 분류 기준 조정 가능.",
+  "systems": [
+    {
+      "id": "coc",
+      "label": "CoC",
+      "db_title": "CoC 시나리오 정리",
+      "keywords": [
+        "CoC", "COC", "coc",
+        "クトゥルフ", "크툴루", "크쑬루",
+        "Call of Cthulhu", "call of cthulhu",
+        "CoC6", "CoC7", "coc6", "coc7",
+        "クトゥルー", "Cthulhu"
+      ]
+    },
+    {
+      "id": "insane",
+      "label": "inSANe",
+      "db_title": "inSANe 시나리오 정리",
+      "keywords": [
+        "inSANe", "insane", "インセイン", "인세인"
+      ]
+    },
+    {
+      "id": "secret_agency",
+      "label": "비밀요원국",
+      "db_title": "비밀요원국 시나리오 정리",
+      "keywords": [
+        "비밀요원국", "秘密要員局", "비요국"
+      ]
+    },
+    {
+      "id": "seolhwa",
+      "label": "설화학당",
+      "db_title": "설화학당 시나리오 정리",
+      "keywords": [
+        "설화학당", "雪花学堂"
+      ]
+    },
+    {
+      "id": "magica_logia",
+      "label": "마기카로기아",
+      "db_title": "마기카로기아 시나리오 정리",
+      "keywords": [
+        "마기카로기아", "マギカロギア", "Magica Logia", "magica logia", "MagicaLogia"
+      ]
+    },
+    {
+      "id": "shinobigami",
+      "label": "시노비가미",
+      "db_title": "시노비가미 시나리오 정리",
+      "keywords": [
+        "시노비가미", "シノビガミ", "Shinobigami", "shinobigami"
+      ]
+    },
+    {
+      "id": "other",
+      "label": "기타",
+      "db_title": "기타 TRPG 시나리오 정리",
+      "keywords": []
+    }
+  ]
+}

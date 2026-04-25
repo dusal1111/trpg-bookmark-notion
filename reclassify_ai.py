@@ -17,7 +17,7 @@ classified_bookmarks.jsonl 의 모든 항목에 대해 AI로 필드 추출
     python reclassify_ai.py --dry-run  (실제 저장 없이 결과만 확인)
 """
 
-import json, os, sys, time, subprocess
+import json, os, sys, time
 from pathlib import Path
 from urllib import request as ureq
 import urllib.error
@@ -38,7 +38,7 @@ if _env_file.exists():
 OPENAI_API_KEY      = os.environ.get("OPENAI_API_KEY", "")
 GEMINI_API_KEY      = os.environ.get("GEMINI_API_KEY", "")
 VERTEX_PROJECT_ID   = os.environ.get("VERTEX_PROJECT_ID", "")
-VERTEX_REGION       = os.environ.get("VERTEX_REGION", "us-central1")
+VERTEX_REGION       = os.environ.get("VERTEX_REGION", "global")
 VERTEX_ACCESS_TOKEN = os.environ.get("VERTEX_ACCESS_TOKEN", "")  # gcloud auth print-access-token
 
 OPENAI_MODEL = "gpt-4.1-mini"
@@ -175,108 +175,29 @@ def call_gemini(prompt: str) -> str:
     raise ValueError(f"응답 비어있음. finishReason={candidate.get('finishReason')}")
 
 
-def _get_vertex_token() -> str:
-    """
-    Vertex AI Bearer 토큰 반환. 아래 순서로 시도.
-    1) google-auth ADC (gcloud auth application-default login)
-    2) gcloud auth print-access-token (gcloud auth login)
-    3) VERTEX_ACCESS_TOKEN 환경변수
-    """
-    # 1) google-auth ADC
-    try:
-        import google.auth
-        import google.auth.transport.requests
-        creds, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
-        creds.refresh(google.auth.transport.requests.Request())
-        return creds.token
-    except ImportError:
-        print("  ℹ️  google-auth 미설치 → gcloud CLI로 시도합니다.")
-    except Exception as e:
-        print(f"  ⚠️  google-auth ADC 실패: {e}")
-
-    # 2) gcloud CLI (Windows는 gcloud.cmd, 일반 환경은 gcloud)
-    gcloud_bin = "gcloud.cmd" if sys.platform == "win32" else "gcloud"
-    gcloud_candidates = [gcloud_bin]
-
-    # Windows 기본 설치 경로 직접 탐색
-    if sys.platform == "win32":
-        import glob as _glob
-        patterns = [
-            r"C:\Users\*\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
-            r"C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
-            r"C:\Program Files\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
-        ]
-        for pat in patterns:
-            found = _glob.glob(pat)
-            if found:
-                gcloud_candidates.insert(0, found[0])
-                break
-
-    gcloud_found = False
-    for gcloud in gcloud_candidates:
-        for args in (
-            [gcloud, "auth", "print-access-token"],
-            [gcloud, "auth", "application-default", "print-access-token"],
-        ):
-            try:
-                result = subprocess.run(args, capture_output=True, text=True, timeout=10)
-                token = result.stdout.strip()
-                if result.returncode == 0 and token:
-                    return token
-                if result.stderr.strip():
-                    print(f"  ⚠️  {' '.join(args)} 실패: {result.stderr.strip()}")
-                gcloud_found = True
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                print(f"  ⚠️  gcloud 실행 오류: {e}")
-                gcloud_found = True
-
-    if not gcloud_found:
-        print("  ⚠️  gcloud CLI를 찾을 수 없습니다.")
-
-    # 3) 환경변수 직접 입력
-    if VERTEX_ACCESS_TOKEN:
-        return VERTEX_ACCESS_TOKEN
-
-    raise RuntimeError(
-        "Vertex AI 인증 실패. 다음 중 하나를 시도하세요:\n"
-        "  1) pip install google-auth requests\n"
-        "     gcloud auth application-default login\n"
-        "  2) gcloud auth login  →  gcloud auth print-access-token\n"
-        "     결과를 .env에 VERTEX_ACCESS_TOKEN=ya29... 로 추가\n"
-        "  3) 또는 GEMINI_API_KEY를 aistudio.google.com 에서 새로 발급"
-    )
-
-
 def call_vertex(prompt: str) -> str:
-    token = _get_vertex_token()
-    url = (
-        f"https://{VERTEX_REGION}-aiplatform.googleapis.com/v1/projects/{VERTEX_PROJECT_ID}"
-        f"/locations/{VERTEX_REGION}/publishers/google/models/{GEMINI_MODEL}:generateContent"
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        raise RuntimeError(
+            "google-genai 미설치. 다음 명령어로 설치하세요:\n"
+            "  pip install google-genai"
+        )
+    client = genai.Client(
+        vertexai=True,
+        project=VERTEX_PROJECT_ID,
+        location=VERTEX_REGION,
     )
-    result = _http_post(
-        url,
-        {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 4096,
-            },
-        },
-        {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}",
-        }
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.1,
+            max_output_tokens=4096,
+        ),
     )
-    candidate = result.get("candidates", [{}])[0]
-    parts = candidate.get("content", {}).get("parts", [])
-    for p in parts:
-        if "text" in p and not p.get("thought", False):
-            return p["text"].strip()
-    raise ValueError(f"응답 비어있음. finishReason={candidate.get('finishReason')}")
+    return response.text.strip()
 
 
 def call_ai(prompt: str) -> str:
@@ -349,11 +270,11 @@ def main():
         provider_label = f"OpenAI ({OPENAI_MODEL})"
     elif AI_PROVIDER == "vertex":
         provider_label = f"Vertex AI ({GEMINI_MODEL}, project={VERTEX_PROJECT_ID}, region={VERTEX_REGION})"
-        # 배치 시작 전에 인증 토큰 미리 검증
-        try:
-            _get_vertex_token()
-        except RuntimeError as e:
-            print(f"\n❌ Vertex AI 인증 실패:\n  {e}")
+        # google-genai 설치 여부 미리 확인
+        import importlib.util
+        if importlib.util.find_spec("google.genai") is None:
+            print("\n❌ google-genai 미설치. 다음 명령어로 설치하세요:")
+            print("   pip install google-genai")
             sys.exit(1)
     else:
         provider_label = f"Gemini AI Studio ({GEMINI_MODEL})"

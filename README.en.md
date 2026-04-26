@@ -1,17 +1,17 @@
-# 🔖 Twitter Bookmarks → Notion Auto-Organizer
+# 🎲 Twitter TRPG Scenario Bookmarks → Notion Auto-Organizer
 
-A tool that automatically collects your Twitter(X) bookmarks, categorizes them by keyword, and saves them to a Notion database.  
-Built with vibe coding.
+A tool that automatically collects your Twitter(X) TRPG scenario bookmarks,  
+classifies them by system, extracts info with AI, and saves them to Notion databases.
 
 ---
 
 ## ✨ What does it do?
 
 - Fetches all your Twitter bookmarks at once
-- Automatically categorizes them by keyword
-- Saves them to a Notion database for easy search & filtering
+- Automatically classifies them by TRPG system (CoC / inSANe / Shinobigami, etc.)
+- Uses AI to extract scenario name, player count, mood, and overview
+- Creates a separate Notion DB for each TRPG system
 - On subsequent runs, only fetches newly added bookmarks (no duplicates)
-- If you have an AI API key, it can re-classify anything that landed in "Other"
 
 ---
 
@@ -23,7 +23,7 @@ Built with vibe coding.
 | Python 3.8+ | Required | See installation below |
 | Twitter(X) account | Required | Must be logged in |
 | Notion account | Required | |
-| OpenAI or Gemini API key | Optional | Only needed for AI re-classification |
+| AI API key | Optional | Needed for AI field extraction (see below) |
 
 ---
 
@@ -62,37 +62,31 @@ It will guide you through entering the required values one by one.
 > These are cookie values that keep you logged in. Do not share them with anyone.
 
 1. Log in to **x.com** on Chrome or Edge
-2. Press **F12** to open Developer Tools
-3. Click the **Application** tab
-4. Left sidebar: **Cookies** → **https://x.com**
-5. Find **`ct0`** in the list and copy its Value
-6. Find **`auth_token`** in the list and copy its Value
+2. Press **F12** → **Application** tab → left sidebar **Cookies** → **https://x.com**
+3. Find **`ct0`** and **`auth_token`** in the list and copy each value
 
-> 💡 If your tokens expire (after logout or password change), just re-run `setup.bat` to update them.
+> 💡 If your tokens expire (after logout or password change), re-run `setup.bat` to update them.
 
 ---
 
 #### 📝 How to get your Notion token
 
 1. Go to https://www.notion.so/my-integrations (Notion login required)
-2. Click **"+ Create new integration"**
-3. Enter any name (e.g. `TwitterBookmarks`) → **Submit**
-4. Click **Show** next to **"Internal Integration Secret"** → copy the value
+2. Click **"+ Create new integration"** → enter a name → **Submit**
+3. Click **Show** next to **"Internal Integration Secret"** → copy the value
 
 ---
 
 #### 📄 How to get your Notion page ID
 
-You need a Notion page where the bookmark database will be created. You can create a new one.
+You need a Notion page where the system DBs will be created.
 
 1. Open the target page in Notion
-2. Click **`...`** in the top-right corner
-3. **Connections** → click your integration name to connect it
-4. Check the URL in your browser:
+2. Click **`...`** in the top-right → **Connections** → click your integration name to connect
+3. Check the URL in your browser — the last 32 characters are the page ID:
    ```
    https://www.notion.so/page-name-abc123def456abc123def456abc123de
                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                                   These 32 characters are the page ID
    ```
 
 ---
@@ -106,98 +100,115 @@ After setup, just double-click **`run.bat`** every time.
   Twitter Bookmark Pipeline
 ====================================================
 
-  1. Sync bookmarks   (fetch new bookmarks from Twitter)
-  2. Classify         (auto-categorize bookmarks)
-  3. Notion upload    (save to Notion DB)
-  4. Run all          (1 → 2 → 3 at once)
-  5. AI reclassify    (reclassify 'Other' with OpenAI/Gemini)
-  6. Full reclassify  (reset classifications and start over)
+  1. Sync bookmarks    (fetch new bookmarks from Twitter)
+  2. Classify          (auto-classify by TRPG system)
+  3. AI extract        (auto-extract name/players/mood/overview)
+  4. Notion upload     (save to Notion DB)
+  5. Run all           (1 → 2 → 3 → 4 at once)
+  6. Full reclassify   (reset classifications and start over)
   0. Quit
 ```
 
-First time? Select **4 (Run all)**. After that, running 4 periodically will only add new bookmarks.
+First time? Select **5 (Run all)**. After that, run 5 periodically to add only new bookmarks.
 
 ---
 
-## 📁 Categories — default settings, add keywords to expand each category
+## 🎲 Supported TRPG Systems
 
-| Category | Description |
-|----------|-------------|
-| Beauty & Skincare | Skincare routines, makeup, haircare, etc. |
-| Fitness & Diet | Home workouts, exercise routines, diet tips |
-| Study & Learning | Study methods, exam prep, learning resources |
-| Humor & Memes | Funny tweets, memes, relatable content |
-| Fashion & Style | Outfit recommendations, lookbooks, shopping |
-| Art & Illustration | Drawing tips, coloring tutorials, art references (KO/EN/JA) |
-| Cooking & Recipes | Easy recipes, meal prep, home cooking |
-| Life Tips & Info | Life hacks, useful information, practical tips |
-| Tech & Tools | AI tools, coding, automation, development |
-| Motivation & Quotes | Quotes, self-improvement, inspirational content |
-| Fandom & Fan culture | Fan art, cosplay, idols, anime, 2D/3D content |
-| Other | Anything that doesn't fit the above |
+Defined in `trpg_systems.json`. Edit keywords to adjust classification rules.
 
-Default keywords are pre-configured. Open `categories.json` with a text editor to add more keywords to any category.
+| System | Notion DB Name |
+|--------|----------------|
+| Call of Cthulhu (CoC) | CoC 시나리오 정리 |
+| inSANe | inSANe 시나리오 정리 |
+| 비밀요원국 | 비밀요원국 시나리오 정리 |
+| 설화학당 | 설화학당 시나리오 정리 |
+| Magica Logia | 마기카로기아 시나리오 정리 |
+| Shinobigami | 시노비가미 시나리오 정리 |
+| Other | 기타 시나리오 정리 |
 
 ---
 
-## 🤖 AI Re-classification (optional)
+## 📊 Notion DB Fields
 
-If many tweets end up in "Other," AI can take another pass at classifying them.  
-**You only need one of OpenAI or Gemini.** Everything else works without it.
+Fields saved to each system's database:
 
-- Get OpenAI key: https://platform.openai.com/api-keys
-- Get Gemini key: https://aistudio.google.com/app/apikey
+| Field | Description | Source |
+|-------|-------------|--------|
+| Scenario Name | Scenario title | AI extracted |
+| Distribution URL | Scenario download link | Tweet link |
+| Min / Max Players | Player count | AI extracted |
+| Mood | Horror, Slice-of-life, Mystery, etc. (multi-select) | AI extracted |
+| Overview | 1–2 sentence summary | AI extracted |
+| Original Tweet | Source tweet URL | Auto |
+| Image | Tweet media image | Auto |
+| Saved Date / Tweet Date | Date info | Auto |
+| Retweet Count | Engagement metric | Auto |
 
-Re-run `setup.bat` to enter your key, or open the `.env` file in a text editor and add it directly:
+---
+
+## 🤖 AI Field Extraction (optional)
+
+AI automatically extracts scenario name, player count, mood, and overview.  
+You only need **one** of the following (in priority order):
+
+| AI | Key name | Where to get it |
+|----|----------|-----------------|
+| OpenAI | `OPENAI_API_KEY` | https://platform.openai.com/api-keys |
+| Vertex AI | `VERTEX_PROJECT_ID` | GCP Console (requires gcloud CLI auth) |
+| Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/app/apikey |
+
+Re-run `setup.bat` to enter your key, or open `.env` in a text editor and add it directly:
 
 ```
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
+VERTEX_PROJECT_ID=my-gcp-project
 ```
+
+> Vertex AI requires running `gcloud auth application-default login` for authentication.
 
 ---
 
 ## ❓ FAQ
 
 **Q. I get "python is not recognized as an internal or external command..."**  
-→ You didn't check "Add Python to PATH" during installation. Uninstall Python and reinstall, making sure to check that box.
+→ You didn't check "Add Python to PATH" during installation. Reinstall Python and make sure to check that box.
 
 **Q. Token error / bookmarks won't load**  
 → Logging out of Twitter or changing your password invalidates the tokens. Re-run `setup.bat` to enter new ones.
 
 **Q. Notion upload isn't working**  
-→ Make sure your Integration is connected to the Notion page. (Page `...` menu → Connections)
+→ Make sure your Integration is connected to the Notion page. (Page `...` → Connections)
 
 **Q. Old bookmarks are being uploaded again**  
 → The `uploaded_ids.json` file tracks what's been uploaded. If it gets deleted, duplicates will appear. Don't delete this file.
 
-**Q. I entered an AI key but getting an error**  
-→ Open `.env` in a text editor and check that `OPENAI_API_KEY` or `GEMINI_API_KEY` is correct. No spaces or quotes around the value.
+**Q. What happens if I upload without AI extraction?**  
+→ The scenario name will use the first 50 characters of the tweet, and players/mood/overview will be empty. Re-uploading after extraction is not possible, so extract first if you can.
 
 ---
 
 ## 📂 File structure
 
-All files must be in **the same folder**.
-
 ```
-twitter-bookmark-notion/
+trpg-bookmark-notion/
 ├── setup.bat                  ← Initial setup (run once)
 ├── run.bat                    ← Run this every time
-├── setup_wizard.py            Setup wizard (called by setup.bat)
-├── run_menu.py                Main menu (called by run.bat)
+├── setup_wizard.py            Setup wizard
+├── run_menu.py                Main menu
 ├── bookmark_sync.py           Twitter bookmark fetcher
-├── classify_bookmarks.py      Keyword-based auto classifier
-├── reclassify_ai.py           AI re-classifier (OpenAI/Gemini)
+├── classify_bookmarks.py      TRPG system classifier
+├── reclassify_ai.py           AI field extractor (OpenAI/Vertex/Gemini)
 ├── setup_and_upload.py        Notion DB creation & upload
-├── categories.json            Category & keyword configuration
+├── trpg_systems.json          System definitions & keyword config
 │
 │   ← Files below are auto-generated (do not touch)
 ├── .env                       Saved tokens
 ├── bookmarks.jsonl            Fetched bookmarks
 ├── classified_bookmarks.jsonl Classified bookmarks
 ├── uploaded_ids.json          Notion upload log (deleting causes duplicates)
-└── notion_db_id.txt           Generated Notion DB ID
+└── notion_db_ids.json         Generated Notion DB ID list
 ```
 
 ---
@@ -212,5 +223,4 @@ twitter-bookmark-notion/
 
 ## 📜 License
 
-MIT License — free for personal and non-commercial use.  
-made by [@ryuri-r](https://github.com/ryuri-r)
+MIT License — free for personal and non-commercial use.

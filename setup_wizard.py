@@ -50,12 +50,13 @@ STRINGS = {
         # Step 4
         "step4_title":      "[4단계] AI 재분류 키 (선택 — 없어도 됩니다)",
         "step4_guide": (
-            "'기타'로 분류된 트윗을 AI가 다시 분류할 때 사용합니다.\n"
-            "OpenAI 또는 Gemini 중 하나만 있으면 됩니다.\n"
-            "없으면 그냥 Enter — AI 재분류 기능만 빠지고 나머지는 정상 동작합니다."
+            "시나리오 이름/인원/분위기/개요를 AI가 추출할 때 사용합니다.\n"
+            "OpenAI / Vertex AI / Gemini 중 하나만 있으면 됩니다 (우선순위 순).\n"
+            "없으면 그냥 Enter — AI 추출 기능만 빠지고 나머지는 정상 동작합니다."
         ),
         "ask_openai":       "  OpenAI API 키 (없으면 Enter): ",
         "warn_openai":      "OpenAI API 키는 'sk-'로 시작해야 합니다. 키를 다시 확인하세요.",
+        "ask_vertex":       "  Vertex AI 프로젝트 ID (없으면 Enter): ",
         "ask_gemini":       "  Gemini API 키 (없으면 Enter): ",
         "warn_gemini":      "Gemini API 키는 'AIza'로 시작해야 합니다. 키를 다시 확인하세요.",
         # 완료
@@ -105,12 +106,13 @@ STRINGS = {
         # Step 4
         "step4_title":      "[Step 4] AI reclassify key (optional)",
         "step4_guide": (
-            "Used to reclassify tweets marked as 'Other' using AI.\n"
-            "You only need one of OpenAI or Gemini.\n"
+            "Used by AI to extract scenario name / players / mood / overview.\n"
+            "You only need one of OpenAI, Vertex AI, or Gemini (in priority order).\n"
             "Press Enter to skip — all other features will work normally."
         ),
         "ask_openai":       "  OpenAI API key (Enter to skip): ",
         "warn_openai":      "OpenAI API key must start with 'sk-'. Please check.",
+        "ask_vertex":       "  Vertex AI Project ID (Enter to skip): ",
         "ask_gemini":       "  Gemini API key (Enter to skip): ",
         "warn_gemini":      "Gemini API key must start with 'AIza'. Please check.",
         # Done
@@ -160,12 +162,13 @@ STRINGS = {
         # Step 4
         "step4_title":      "[ステップ4] AI 再分類キー（任意）",
         "step4_guide": (
-            "「その他」に分類されたツイートをAIが再分類するときに使用します。\n"
-            "OpenAI または Gemini のどちらか一方だけで構いません。\n"
+            "AIがシナリオ名・人数・雰囲気・概要を抽出するときに使用します。\n"
+            "OpenAI / Vertex AI / Gemini のどれか一つで構いません（優先順）。\n"
             "不要な場合はそのままEnterを押してください。他の機能は正常に動作します。"
         ),
         "ask_openai":       "  OpenAI API キー（スキップする場合はEnter）: ",
         "warn_openai":      "OpenAI API キーは 'sk-' で始まる必要があります。",
+        "ask_vertex":       "  Vertex AI プロジェクト ID（スキップする場合はEnter）: ",
         "ask_gemini":       "  Gemini API キー（スキップする場合はEnter）: ",
         "warn_gemini":      "Gemini API キーは 'AIza' で始まる必要があります。",
         # 完了
@@ -302,8 +305,12 @@ def main():
             (lambda v: v.startswith("sk-"), s["warn_openai"]),
         ])
 
+    vertex_project = ""
     gemini_key = ""
     if not openai_key:
+        vertex_project = ask(s["ask_vertex"])
+
+    if not openai_key and not vertex_project:
         gemini_key = ask(s["ask_gemini"])
         if gemini_key:
             gemini_key = validate(s, gemini_key, [
@@ -319,6 +326,7 @@ def main():
         f"NOTION_PARENT_PAGE_ID={page_id}",
         f"OPENAI_API_KEY={openai_key}",
         f"GEMINI_API_KEY={gemini_key}",
+        f"VERTEX_PROJECT_ID={vertex_project}",
     ]
     ENV_FILE.write_text("\n".join(lines), encoding="utf-8")
 

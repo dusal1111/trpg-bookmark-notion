@@ -21,6 +21,7 @@ STRINGS = {
             "4. Notion 업로드 (Notion DB에 저장)",
             "5. 전체 실행     (1 → 2 → 3 → 4 한 번에)",
             "6. 전체 재분류   (분류 결과 초기화 후 처음부터 다시)",
+            "7. Notion 기록 복구 (기존 DB에서 업로드 기록 복구)",
             "0. 종료",
         ],
         "input":          "  번호를 입력하세요: ",
@@ -31,6 +32,7 @@ STRINGS = {
         "done":           "전체 실행 완료!",
         "reset_confirm":  "분류 결과를 초기화하고 처음부터 다시 분류합니다.\n  계속할까요? (y/n): ",
         "reset_cancel":   "취소했습니다.",
+        "recover_start":  "기존 Notion DB에서 DB 목록과 업로드 기록을 복구합니다.",
         "quit":           "종료합니다.",
         "invalid":        "잘못된 입력입니다.",
     },
@@ -44,6 +46,7 @@ STRINGS = {
             "4. Notion upload    (save to Notion DB)",
             "5. Run all          (1 → 2 → 3 → 4 at once)",
             "6. Full reclassify  (reset classifications and start over)",
+            "7. Recover Notion records (restore upload records from existing DBs)",
             "0. Quit",
         ],
         "input":          "  Enter number: ",
@@ -54,6 +57,7 @@ STRINGS = {
         "done":           "All done!",
         "reset_confirm":  "This will reset all classifications and start over.\n  Continue? (y/n): ",
         "reset_cancel":   "Cancelled.",
+        "recover_start":  "Recovering the DB list and upload records from existing Notion DBs.",
         "quit":           "Goodbye.",
         "invalid":        "Invalid input.",
     },
@@ -67,6 +71,7 @@ STRINGS = {
             "4. Notion アップロード (Notion DBに保存)",
             "5. 一括実行           (1 → 2 → 3 → 4 をまとめて実行)",
             "6. 全体再分類         (分類結果をリセットして最初からやり直し)",
+            "7. Notion記録を復元   (既存DBからアップロード記録を復元)",
             "0. 終了",
         ],
         "input":          "  番号を入力してください: ",
@@ -77,6 +82,7 @@ STRINGS = {
         "done":           "すべての処理が完了しました！",
         "reset_confirm":  "分類結果をリセットして最初からやり直します。\n  続けますか？ (y/n): ",
         "reset_cancel":   "キャンセルしました。",
+        "recover_start":  "既存のNotion DBからDB一覧とアップロード記録を復元します。",
         "quit":           "終了します。",
         "invalid":        "無効な入力です。",
     },
@@ -160,6 +166,9 @@ def main():
                 run_with_arg("classify_bookmarks.py", "--reset")
             else:
                 print(s["reset_cancel"])
+        elif choice == "7":
+            print(s["recover_start"])
+            run_with_arg("setup_and_upload.py", "--recover")
         elif choice == "0":
             print(s["quit"])
             break

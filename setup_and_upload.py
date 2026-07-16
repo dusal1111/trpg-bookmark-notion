@@ -13,9 +13,10 @@ DB 스키마:
     python setup_and_upload.py           (DB 생성 + 전체 업로드)
     python setup_and_upload.py --setup   (DB 생성만)
     python setup_and_upload.py --upload  (이미 DB 있으면 업로드만)
+    python setup_and_upload.py --recover (기존 Notion DB에서 업로드 기록 복구)
 """
 
-import json, os, sys, time
+import json, os, re, sys, time
 from pathlib import Path
 from datetime import datetime
 from urllib import request as ureq
@@ -40,6 +41,7 @@ UPLOADED_FILE   = BASE_DIR / "uploaded_ids.json"
 
 ONLY_SETUP  = "--setup"  in sys.argv
 ONLY_UPLOAD = "--upload" in sys.argv
+ONLY_RECOVER = "--recover" in sys.argv
 
 HEADERS = {
     "Authorization":  f"Bearer {NOTION_TOKEN}",
@@ -92,6 +94,115 @@ def save_db_ids(db_ids: dict):
     DB_IDS_FILE.write_text(
         json.dumps(db_ids, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+
+
+# ── 기존 Notion DB/업로드 기록 복구 ───────────────────────────────────
+def _plain_title(database: dict) -> str:
+    return "".join(part.get("plain_text", "") for part in database.get("title", []))
+
+
+def _paginated_post(path: str, body: dict):
+    """Notion의 cursor 기반 목록 API 결과를 끝까지 순회한다."""
+    cursor = None
+    while True:
+        payload = dict(body)
+        if cursor:
+            payload["start_cursor"] = cursor
+        result = api("POST", path, payload)
+        yield from result.get("results", [])
+        if not result.get("has_more"):
+            break
+        cursor = result.get("next_cursor")
+        if not cursor:
+            break
+
+
+def _find_existing_databases(systems: list) -> dict:
+    """제목으로 시스템 DB를 찾는다. Notion 화면상의 배치/정렬 순서는 무관하다."""
+    wanted = {s["db_title"]: s["id"] for s in systems}
+    candidates: dict[str, list[dict]] = {title: [] for title in wanted}
+    body = {"filter": {"property": "object", "value": "database"}, "page_size": 100}
+
+    for database in _paginated_post("search", body):
+        title = _plain_title(database)
+        if title in candidates and not database.get("archived", False):
+            candidates[title].append(database)
+
+    parent_id = PARENT_PAGE_ID.replace("-", "").lower()
+    recovered: dict[str, str] = {}
+    for title, system_id in wanted.items():
+        matches = candidates[title]
+        if not matches:
+            print(f"  [못 찾음] {title}")
+            continue
+
+        # 같은 제목이 여러 개면 설정된 부모 페이지 바로 아래의 DB를 우선한다.
+        matches.sort(key=lambda db: (
+            (db.get("parent", {}).get("page_id", "").replace("-", "").lower() != parent_id),
+            db.get("last_edited_time", ""),
+        ))
+        chosen = matches[0]
+        db_id = chosen["id"].replace("-", "")
+        recovered[system_id] = db_id
+        suffix = f" (동명 DB {len(matches)}개 중 선택)" if len(matches) > 1 else ""
+        print(f"  [복구] {title}: {db_id}{suffix}")
+    return recovered
+
+
+def _tweet_id_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    match = re.search(r"/(?:status|statuses)/(\d+)(?:[/?#]|$)", url)
+    return match.group(1) if match else None
+
+
+def recover_from_notion(systems: list):
+    print("기존 Notion DB 검색 중...")
+    recovered_db_ids = _find_existing_databases(systems)
+    if not recovered_db_ids:
+        print("\n복구 가능한 DB를 찾지 못했습니다.")
+        print("DB 제목과 Integration 연결 상태를 확인해주세요.")
+        sys.exit(1)
+
+    # 일부만 찾았더라도 기존 기록을 보존하면서 발견한 DB ID를 갱신한다.
+    db_ids = load_db_ids()
+    db_ids.update(recovered_db_ids)
+    save_db_ids(db_ids)
+
+    uploaded = load_uploaded()
+    before = len(uploaded)
+    pages_seen = 0
+    missing_url = 0
+    invalid_url = 0
+
+    print("\n기존 페이지의 원본 트윗 링크 읽는 중...")
+    for system_id, db_id in recovered_db_ids.items():
+        count = 0
+        try:
+            for page in _paginated_post(f"databases/{db_id}/query", {"page_size": 100}):
+                pages_seen += 1
+                prop = page.get("properties", {}).get("원본 트윗 링크", {})
+                url = prop.get("url")
+                if not url:
+                    missing_url += 1
+                    continue
+                tweet_id = _tweet_id_from_url(url)
+                if not tweet_id:
+                    invalid_url += 1
+                    continue
+                if tweet_id not in uploaded:
+                    count += 1
+                uploaded.add(tweet_id)
+            print(f"  {system_id}: {count}개 ID 추가")
+        except Exception as e:
+            print(f"  [오류] {system_id} DB 조회 실패: {e}")
+
+    save_uploaded(uploaded)
+    print(f"\n복구 완료: notion_db_ids.json / uploaded_ids.json")
+    print(f"  조회 페이지: {pages_seen}개")
+    print(f"  업로드 ID: {before}개 → {len(uploaded)}개")
+    if missing_url or invalid_url:
+        print(f"  링크 없음: {missing_url}개 / 트윗 ID 해석 실패: {invalid_url}개")
 
 
 # ── DB 생성 ────────────────────────────────────────────────────────────
@@ -301,6 +412,10 @@ def main():
         sys.exit(1)
 
     systems = load_systems()
+
+    if ONLY_RECOVER:
+        recover_from_notion(systems)
+        return
 
     if ONLY_UPLOAD:
         db_ids = load_db_ids()

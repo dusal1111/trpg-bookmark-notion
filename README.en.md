@@ -143,7 +143,6 @@ Fields saved to each system's database:
 | Original Tweet | Source tweet URL | Auto |
 | Image | Tweet media image | Auto |
 | Saved Date / Tweet Date | Date info | Auto |
-| Retweet Count | Engagement metric | Auto |
 
 ---
 

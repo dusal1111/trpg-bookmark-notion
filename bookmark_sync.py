@@ -21,6 +21,7 @@ if _env_file.exists():
 # ── 설정 ────────────────────────────────────────────────────────────
 OUTPUT_DIR   = Path(__file__).parent          # 스크립트와 같은 폴더
 OUTPUT_FILE  = OUTPUT_DIR / "bookmarks.jsonl"
+UPLOADED_FILE = OUTPUT_DIR / "uploaded_ids.json"
 
 # 트위터 인증 정보 (.env에서 로드)
 _CT0        = os.environ.get("TWITTER_CT0", "")
@@ -51,6 +52,23 @@ FEATURES  = {
     "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
     "responsive_web_media_download_video_enabled": False,
 }
+
+def load_id_file(path: Path) -> set:
+    if not path.exists():
+        return set()
+    ids = set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            ids.update(str(x) for x in data)
+    except Exception:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    ids.add(str(json.loads(line)["id"]))
+                except Exception:
+                    pass
+    return ids
 
 def _best_media_url(m: dict) -> str:
     """
@@ -202,16 +220,13 @@ def sync():
     auth_token = cookies["auth_token"]
 
     # 기존 북마크 ID 로드 (중복 방지)
-    existing_ids = set()
-    if OUTPUT_FILE.exists():
-        with open(OUTPUT_FILE, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    existing_ids.add(json.loads(line)["id"])
-                except Exception:
-                    pass
+    existing_ids = load_id_file(OUTPUT_FILE)
+    uploaded_ids = load_id_file(UPLOADED_FILE)
+    existing_ids.update(uploaded_ids)
 
     print(f"기존 북마크: {len(existing_ids)}개")
+    if uploaded_ids:
+        print(f"Notion 업로드 기록: {len(uploaded_ids)}개 스킵 기준에 포함")
 
     all_new   = []
     cursor    = None

@@ -17,6 +17,7 @@ BASE_DIR       = Path(__file__).parent
 BOOKMARKS_FILE = BASE_DIR / "bookmarks.jsonl"
 SYSTEMS_FILE   = BASE_DIR / "trpg_systems.json"
 OUTPUT_FILE    = BASE_DIR / "classified_bookmarks.jsonl"
+UPLOADED_FILE  = BASE_DIR / "uploaded_ids.json"
 
 _env_file = BASE_DIR / ".env"
 if _env_file.exists():
@@ -27,6 +28,18 @@ if _env_file.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 RESET = "--reset" in sys.argv
+
+
+def load_uploaded_ids() -> set:
+    if not UPLOADED_FILE.exists():
+        return set()
+    try:
+        data = json.loads(UPLOADED_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return set(str(x) for x in data)
+    except Exception:
+        pass
+    return set()
 
 
 def load_systems() -> list:
@@ -58,6 +71,7 @@ def main():
     print(f"시스템 {len(systems)}개 로드: {[s['label'] for s in systems]}\n")
 
     already_done: set = set()
+    uploaded_ids = load_uploaded_ids()
     if OUTPUT_FILE.exists() and not RESET:
         with open(OUTPUT_FILE, encoding="utf-8") as f:
             for line in f:
@@ -66,6 +80,9 @@ def main():
                 except Exception:
                     pass
         print(f"기존 분류 완료: {len(already_done)}개 (스킵됨)\n")
+    if uploaded_ids and not RESET:
+        already_done.update(uploaded_ids)
+        print(f"Notion 업로드 완료: {len(uploaded_ids)}개 (스킵됨)\n")
 
     if not BOOKMARKS_FILE.exists():
         print(f"오류: {BOOKMARKS_FILE} 없음")

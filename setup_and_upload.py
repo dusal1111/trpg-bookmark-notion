@@ -7,7 +7,7 @@ classified_bookmarks.jsonl → 시스템별 Notion DB 생성 + 업로드
 
 DB 스키마:
     시나리오 이름 / 배포 URL / 최소인원 / 최대인원 / 분위기(다중선택) /
-    개요 / 원본 트위터 링크 / 이미지 / 저장일 / 트윗작성일 / 리트윗수
+    개요 / 원본 트위터 링크 / 이미지 / 저장일 / 트윗작성일
 
 사용법:
     python setup_and_upload.py           (DB 생성 + 전체 업로드)
@@ -38,6 +38,8 @@ CLASSIFIED_FILE = BASE_DIR / "classified_bookmarks.jsonl"
 SYSTEMS_FILE    = BASE_DIR / "trpg_systems.json"
 DB_IDS_FILE     = BASE_DIR / "notion_db_ids.json"
 UPLOADED_FILE   = BASE_DIR / "uploaded_ids.json"
+
+SOURCE_URL_PROPS = ("원본 트위터 링크", "원본 트윗 링크")
 
 ONLY_SETUP  = "--setup"  in sys.argv
 ONLY_UPLOAD = "--upload" in sys.argv
@@ -156,6 +158,19 @@ def _tweet_id_from_url(url: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def _source_url_from_page(page: dict) -> str | None:
+    props = page.get("properties", {})
+    for prop_name in SOURCE_URL_PROPS:
+        url = props.get(prop_name, {}).get("url")
+        if url:
+            return url
+    for prop in props.values():
+        url = prop.get("url") if isinstance(prop, dict) else None
+        if _tweet_id_from_url(url):
+            return url
+    return None
+
+
 def recover_from_notion(systems: list):
     print("기존 Notion DB 검색 중...")
     recovered_db_ids = _find_existing_databases(systems)
@@ -181,8 +196,7 @@ def recover_from_notion(systems: list):
         try:
             for page in _paginated_post(f"databases/{db_id}/query", {"page_size": 100}):
                 pages_seen += 1
-                prop = page.get("properties", {}).get("원본 트윗 링크", {})
-                url = prop.get("url")
+                url = _source_url_from_page(page)
                 if not url:
                     missing_url += 1
                     continue
@@ -222,7 +236,6 @@ def create_db(system: dict) -> str:
             "이미지":          {"url": {}},
             "저장일":          {"date": {}},
             "트윗작성일":      {"date": {}},
-            "리트윗수":        {"number": {}},
         },
     }
     result = api("POST", "databases", body)
@@ -304,11 +317,6 @@ def make_page(bm: dict, db_id: str) -> dict:
     tweet_date = _parse_tweet_date(bm.get("postedAt") or "")
     if tweet_date:
         props["트윗작성일"] = {"date": {"start": tweet_date}}
-
-    # 리트윗수
-    retweet = (bm.get("engagement") or {}).get("repostCount")
-    if retweet is not None:
-        props["리트윗수"] = {"number": retweet}
 
     page: dict = {"parent": {"database_id": db_id}, "properties": props}
     if media and media[0]:

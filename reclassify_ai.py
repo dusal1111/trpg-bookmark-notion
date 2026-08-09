@@ -27,6 +27,7 @@ BASE_DIR        = Path(__file__).parent
 CLASSIFIED_FILE = BASE_DIR / "classified_bookmarks.jsonl"
 SYSTEMS_FILE    = BASE_DIR / "trpg_systems.json"
 PROGRESS_FILE   = BASE_DIR / ".ai_enrich_progress.json"
+UPLOADED_FILE   = BASE_DIR / "uploaded_ids.json"
 
 _env_file = BASE_DIR / ".env"
 if _env_file.exists():
@@ -68,6 +69,18 @@ else:
 
 DRY_RUN = "--dry-run" in sys.argv
 RESET   = "--reset"   in sys.argv
+
+
+def load_uploaded_ids() -> set:
+    if not UPLOADED_FILE.exists():
+        return set()
+    try:
+        data = json.loads(UPLOADED_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return set(str(x) for x in data)
+    except Exception:
+        pass
+    return set()
 
 # Gemini AI Studio 전용 응답 스키마
 _GEMINI_SCHEMA = {
@@ -334,12 +347,19 @@ def main():
             except Exception:
                 pass
 
+    uploaded_ids = load_uploaded_ids()
+
     if RESET:
         targets = all_bookmarks
         print(f"(--reset: 전체 {len(targets)}개 재추출)\n")
     else:
-        targets = [b for b in all_bookmarks if not b.get("aiEnriched")]
+        targets = [
+            b for b in all_bookmarks
+            if not b.get("aiEnriched") and str(b.get("id")) not in uploaded_ids
+        ]
         print(f"전체: {len(all_bookmarks)}개 / 미추출: {len(targets)}개\n")
+        if uploaded_ids:
+            print(f"Notion 업로드 완료: {len(uploaded_ids)}개 제외\n")
 
     if not targets:
         print("추출할 항목 없음. 재추출: python reclassify_ai.py --reset")
